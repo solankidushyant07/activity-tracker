@@ -329,6 +329,7 @@ private fun QuickRecordSheet(thing: Thing, onDismiss: () -> Unit, onRecord: (Lon
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ThingDetailsScreen(container: AppContainer, id: Long, onBack: () -> Unit) {
     val vm: ThingDetailsViewModel = viewModel(factory = ThingDetailsFactory(container.things, container.occurrences, container.libraries, id))
