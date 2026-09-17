@@ -14,6 +14,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -28,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -110,9 +113,12 @@ private fun HomeScreen(
     val selectedLibrary by vm.selectedLibrary.collectAsState()
     val things = allThings
     val query by vm.query.collectAsState()
+    val summaries by vm.summaries.collectAsState()
     var createOpen by remember { mutableStateOf(false) }
+    var createLibraryOpen by remember { mutableStateOf(false) }
     var recordThing by remember { mutableStateOf<Thing?>(null) }
     var recordError by remember { mutableStateOf<String?>(null) }
+    var toastMessage by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         containerColor = Background,
@@ -189,6 +195,13 @@ private fun HomeScreen(
                                 label = { Text(library.name) }
                             )
                         }
+                        AssistChip(
+                            onClick = { createLibraryOpen = true },
+                            label = { Text("New Library") },
+                            leadingIcon = {
+                                Icon(Icons.Default.Add, contentDescription = null)
+                            }
+                        )
                     }
                 }
             }
@@ -223,6 +236,7 @@ private fun HomeScreen(
                 items(things, key = { it.id }) { thing ->
                     ThingCard(
                         thing = thing,
+                        summary = summaries[thing.id],
                         onOpen = { onThing(thing.id) },
                         onRecord = {
                             recordError = null
@@ -249,8 +263,20 @@ private fun HomeScreen(
             onDismiss = { createOpen = false },
             onCreate = { name ->
                 vm.create(name) {
-                    // Creation returns to Home; it does not unexpectedly open Details.
                     createOpen = false
+                    toastMessage = "Thing created"
+                }
+            }
+        )
+    }
+
+    if (createLibraryOpen) {
+        CreateLibraryDialog(
+            onDismiss = { createLibraryOpen = false },
+            onCreate = { name ->
+                vm.createLibrary(name) {
+                    createLibraryOpen = false
+                    toastMessage = "Library created"
                 }
             }
         )
@@ -263,14 +289,20 @@ private fun HomeScreen(
             onRecord = { at, qty ->
                 vm.record(thing.id, at, qty)
                 recordThing = null
-            }
+            },
+            onSuccess = { toastMessage = "Saved occurrence for ${thing.name}" }
         )
+    }
+
+    toastMessage?.let { message ->
+        SuccessToast(message = message, onDismiss = { toastMessage = null })
     }
 }
 
 @Composable
 private fun ThingCard(
     thing: Thing,
+    summary: HomeThingSummary?,
     onOpen: () -> Unit,
     onRecord: () -> Unit
 ) {
@@ -282,41 +314,352 @@ private fun ThingCard(
         colors = CardDefaults.cardColors(containerColor = Color.White),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
-        Row(
-            Modifier.padding(18.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Primary.copy(alpha = .10f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Bolt, contentDescription = null, tint = Primary)
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            thing.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2
+                        )
+                        summary?.takeIf { it.totalOccurrences > 0 }?.let {
+                            Spacer(Modifier.width(8.dp))
+                            Surface(
+                                color = Primary.copy(alpha = .10f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    "${it.totalOccurrences} recorded",
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        summary?.latest?.let { formatRelativeOccurrence(it.occurredAt) }
+                            ?: "No occurrences yet",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                FilledIconButton(
+                    onClick = onRecord,
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = Primary,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Record ${thing.name}")
+                }
+            }
+
+            summary?.takeIf { it.todayCount > 0 }?.let {
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .35f)
+                )
+                Text(
+                    "Today: ${formatQuantity(it.todayQuantity)}" +
+                        if (it.todayQuantity == 1.0) " occurrence" else " occurrences",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Primary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreateLibraryDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String) -> Unit
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New Library") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name") },
+                placeholder = { Text("e.g. Personal, Reading") },
+                singleLine = true
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onCreate(name) },
+                enabled = name.trim().isNotEmpty()
+            ) { Text("Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun SuccessToast(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    LaunchedEffect(message) {
+        kotlinx.coroutines.delay(2300)
+        onDismiss()
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(bottom = 28.dp),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        Surface(
+            color = Color(0xFF1F2937).copy(alpha = .96f),
+            shape = RoundedCornerShape(16.dp),
+            shadowElevation = 8.dp
         ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = null,
+                    tint = Color(0xFF6EE7B7),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    message,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WheelDateTimePicker(
+    initialMillis: Long,
+    onCancel: () -> Unit,
+    onDone: (Long) -> Unit
+) {
+    val initial = remember(initialMillis) {
+        Calendar.getInstance().apply { timeInMillis = initialMillis }
+    }
+    var hour by rememberSaveable(initialMillis) { mutableIntStateOf(initial.get(Calendar.HOUR).coerceAtLeast(1)) }
+    var minute by rememberSaveable(initialMillis) { mutableIntStateOf(initial.get(Calendar.MINUTE)) }
+    var isPm by rememberSaveable(initialMillis) { mutableStateOf(initial.get(Calendar.AM_PM) == Calendar.PM) }
+    var selectedDateMillis by rememberSaveable(initialMillis) { mutableLongStateOf(initialMillis) }
+    var mode by rememberSaveable { mutableStateOf(false) }
+
+    val dateState = rememberDatePickerState(
+        initialSelectedDateMillis = selectedDateMillis
+    )
+
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (mode) "Select Date" else "Select Time",
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        if (mode) "Choose the calendar date." else "Choose when it actually happened.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                SingleChoiceSegmentedButtonRow {
+                    SegmentedButton(
+                        selected = !mode,
+                        onClick = { mode = false },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                    ) { Text("Time") }
+                    SegmentedButton(
+                        selected = mode,
+                        onClick = { mode = true },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                    ) { Text("Date") }
+                }
+            }
+        },
+        text = {
+            if (mode) {
+                DatePicker(
+                    state = dateState,
+                    showModeToggle = false
+                )
+            } else {
+                WheelTimePicker(
+                    hour = hour,
+                    minute = minute,
+                    isPm = isPm,
+                    onHour = { hour = it },
+                    onMinute = { minute = it },
+                    onAmPm = { isPm = it }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (mode) {
+                        dateState.selectedDateMillis?.let { selectedDateMillis = it }
+                    } else {
+                        val cal = Calendar.getInstance().apply {
+                            timeInMillis = selectedDateMillis
+                            set(Calendar.HOUR, hour)
+                            set(Calendar.MINUTE, minute)
+                            set(Calendar.AM_PM, if (isPm) Calendar.PM else Calendar.AM)
+                            set(Calendar.SECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        onDone(cal.timeInMillis)
+                    }
+                }
+            ) {
+                Text(if (mode) "Use date" else "Done")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun WheelTimePicker(
+    hour: Int,
+    minute: Int,
+    isPm: Boolean,
+    onHour: (Int) -> Unit,
+    onMinute: (Int) -> Unit,
+    onAmPm: (Boolean) -> Unit
+) {
+    val hourState = rememberLazyListState(initialFirstVisibleItemIndex = (hour - 1).coerceIn(0, 11))
+    val minuteState = rememberLazyListState(initialFirstVisibleItemIndex = minute.coerceIn(0, 59))
+    val amPmState = rememberLazyListState(initialFirstVisibleItemIndex = if (isPm) 1 else 0)
+
+    val hourFling = rememberSnapFlingBehavior(hourState)
+    val minuteFling = rememberSnapFlingBehavior(minuteState)
+    val amPmFling = rememberSnapFlingBehavior(amPmState)
+
+    LaunchedEffect(hourState.firstVisibleItemIndex) {
+        onHour((hourState.firstVisibleItemIndex + 1).coerceIn(1, 12))
+    }
+    LaunchedEffect(minuteState.firstVisibleItemIndex) {
+        onMinute(minuteState.firstVisibleItemIndex.coerceIn(0, 59))
+    }
+    LaunchedEffect(amPmState.firstVisibleItemIndex) {
+        onAmPm(amPmState.firstVisibleItemIndex == 1)
+    }
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(210.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(Background)
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .height(68.dp)
+                .padding(horizontal = 8.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Primary.copy(alpha = .08f))
+        )
+        Row(Modifier.fillMaxWidth()) {
+            WheelColumn(
+                values = listOf("AM", "PM"),
+                state = amPmState,
+                flingBehavior = amPmFling,
+                modifier = Modifier.weight(1f),
+                selected = if (isPm) "PM" else "AM",
+                onClick = { onAmPm(it == "PM") }
+            )
+            WheelColumn(
+                values = (1..12).map { "%02d".format(it) },
+                state = hourState,
+                flingBehavior = hourFling,
+                modifier = Modifier.weight(1f),
+                selected = "%02d".format(hour),
+                onClick = { onHour(it.toInt()) }
+            )
+            WheelColumn(
+                values = (0..59).map { "%02d".format(it) },
+                state = minuteState,
+                flingBehavior = minuteFling,
+                modifier = Modifier.weight(1f),
+                selected = "%02d".format(minute),
+                onClick = { onMinute(it.toInt()) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun WheelColumn(
+    values: List<String>,
+    state: androidx.compose.foundation.lazy.LazyListState,
+    flingBehavior: androidx.compose.foundation.gestures.FlingBehavior,
+    modifier: Modifier,
+    selected: String,
+    onClick: (String) -> Unit
+) {
+    LazyColumn(
+        state = state,
+        flingBehavior = flingBehavior,
+        modifier = modifier.height(210.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        contentPadding = PaddingValues(vertical = 71.dp)
+    ) {
+        items(values) { value ->
             Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Primary.copy(alpha = .10f)),
+                Modifier
+                    .fillMaxWidth()
+                    .height(68.dp)
+                    .clickable { onClick(value) },
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Bolt, contentDescription = null, tint = Primary)
-            }
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
                 Text(
-                    thing.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 2
+                    value,
+                    fontSize = if (value == selected) 30.sp else 21.sp,
+                    fontWeight = if (value == selected) FontWeight.ExtraBold else FontWeight.Bold,
+                    color = if (value == selected) Color(0xFF111827) else Color(0xFFCBD5E1),
+                    textAlign = TextAlign.Center
                 )
-                Text(
-                    "Tap to see history",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            FilledIconButton(
-                onClick = onRecord,
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = Primary,
-                    contentColor = Color.White
-                )
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "Record ${thing.name}")
             }
         }
     }
@@ -376,19 +719,22 @@ private fun CreateThingDialog(
 private fun QuickRecordSheet(
     thing: Thing,
     onDismiss: () -> Unit,
-    onRecord: suspend (Long, Double) -> Unit
+    onRecord: suspend (Long, Double) -> Unit,
+    onSuccess: () -> Unit
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var occurredAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    var quantity by remember { mutableStateOf("1") }
+    var occurredAt by rememberSaveable { mutableLongStateOf(System.currentTimeMillis()) }
+    var quantity by rememberSaveable { mutableStateOf("1") }
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var pickerOpen by remember { mutableStateOf(false) }
 
+    val scope = rememberCoroutineScope()
     val parsedQuantity = quantity.toDoubleOrNull()
-    val quantityValid = parsedQuantity != null && parsedQuantity.isFinite() && parsedQuantity > 0.0
+    val quantityValid = parsedQuantity != null &&
+        parsedQuantity.isFinite() &&
+        parsedQuantity > 0.0
 
-    ModalBottomSheet(onDismissRequest = { if (!saving) onDismiss() }) {
+    ModalBottomSheet(onDismissRequest = { if (!saving && !pickerOpen) onDismiss() }) {
         Column(
             Modifier
                 .padding(horizontal = 22.dp, vertical = 8.dp)
@@ -406,13 +752,7 @@ private fun QuickRecordSheet(
             Spacer(Modifier.height(18.dp))
 
             OutlinedButton(
-                onClick = {
-                    showDateTimePicker(
-                        context = context,
-                        initialMillis = occurredAt,
-                        onSelected = { occurredAt = it }
-                    )
-                },
+                onClick = { pickerOpen = true },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Default.Schedule, contentDescription = null)
@@ -421,7 +761,6 @@ private fun QuickRecordSheet(
             }
 
             Spacer(Modifier.height(10.dp))
-
             OutlinedTextField(
                 value = quantity,
                 onValueChange = {
@@ -435,7 +774,6 @@ private fun QuickRecordSheet(
             )
 
             Spacer(Modifier.height(18.dp))
-
             error?.let {
                 Text(
                     it,
@@ -450,6 +788,7 @@ private fun QuickRecordSheet(
                             saving = true
                             error = null
                             runCatching { onRecord(occurredAt, value) }
+                                .onSuccess { onSuccess() }
                                 .onFailure { error = "Couldn't record this. Try again." }
                             saving = false
                         }
@@ -462,6 +801,17 @@ private fun QuickRecordSheet(
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+
+    if (pickerOpen) {
+        WheelDateTimePicker(
+            initialMillis = occurredAt,
+            onCancel = { pickerOpen = false },
+            onDone = {
+                occurredAt = it
+                pickerOpen = false
+            }
+        )
     }
 }
 
@@ -492,6 +842,7 @@ private fun ThingDetailsScreen(
     var editThingOpen by remember { mutableStateOf(false) }
     var deleteThingOpen by remember { mutableStateOf(false) }
     var operationError by remember { mutableStateOf<String?>(null) }
+    var toastMessage by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         containerColor = Background,
@@ -680,7 +1031,8 @@ private fun ThingDetailsScreen(
             onRecord = { at, qty ->
                 vm.record(at, qty)
                 recordOpen = false
-            }
+            },
+            onSuccess = { toastMessage = "Saved successfully" }
         )
     }
 
@@ -721,6 +1073,10 @@ private fun ThingDetailsScreen(
                     .onFailure { operationError = "Couldn't save this Thing. Try again." }
             }
         }
+    }
+
+    toastMessage?.let { message ->
+        SuccessToast(message = message, onDismiss = { toastMessage = null })
     }
 
     if (deleteThingOpen) {
@@ -804,9 +1160,10 @@ private fun EditOccurrenceDialog(
     onDismiss: () -> Unit,
     onSave: (Occurrence) -> Unit
 ) {
-    val context = LocalContext.current
-    var quantity by remember { mutableStateOf(formatQuantity(item.quantity)) }
-    var occurredAt by remember { mutableLongStateOf(item.occurredAt) }
+    var quantity by rememberSaveable { mutableStateOf(formatQuantity(item.quantity)) }
+    var occurredAt by rememberSaveable { mutableLongStateOf(item.occurredAt) }
+    var pickerOpen by remember { mutableStateOf(false) }
+
     val validQuantity = quantity.toDoubleOrNull()?.let {
         it.isFinite() && it > 0.0
     } == true
@@ -817,13 +1174,7 @@ private fun EditOccurrenceDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
-                    onClick = {
-                        showDateTimePicker(
-                            context = context,
-                            initialMillis = occurredAt,
-                            onSelected = { occurredAt = it }
-                        )
-                    },
+                    onClick = { pickerOpen = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Default.Schedule, contentDescription = null)
@@ -839,7 +1190,28 @@ private fun EditOccurrenceDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    isError = quantity.isNotEmpty() && !validQuantity
+                    isError = quantity.isNotEmpty() && !validQuantity,
+                    trailingIcon = {
+                        Row {
+                            IconButton(
+                                onClick = {
+                                    val current = quantity.toDoubleOrNull() ?: 1.0
+                                    quantity = formatQuantity((current - 1.0).coerceAtLeast(1.0))
+                                },
+                                enabled = validQuantity && (quantity.toDoubleOrNull() ?: 1.0) > 1.0
+                            ) {
+                                Icon(Icons.Default.Remove, contentDescription = "Decrease quantity")
+                            }
+                            IconButton(
+                                onClick = {
+                                    val current = quantity.toDoubleOrNull() ?: 1.0
+                                    quantity = formatQuantity(current + 1.0)
+                                }
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Increase quantity")
+                            }
+                        }
+                    }
                 )
             }
         },
@@ -857,6 +1229,17 @@ private fun EditOccurrenceDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+
+    if (pickerOpen) {
+        WheelDateTimePicker(
+            initialMillis = occurredAt,
+            onCancel = { pickerOpen = false },
+            onDone = {
+                occurredAt = it
+                pickerOpen = false
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1215,3 +1598,15 @@ private fun formatHistoryDate(date: LocalDate): String {
 
 private fun formatQuantity(value: Double): String =
     BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
+
+private fun formatRelativeOccurrence(millis: Long): String {
+    val zone = ZoneId.systemDefault()
+    val date = Instant.ofEpochMilli(millis).atZone(zone).toLocalDate()
+    val today = LocalDate.now(zone)
+    val time = formatTime(millis)
+    return when (date) {
+        today -> "Today, $time"
+        today.minusDays(1) -> "Yesterday, $time"
+        else -> "${date.format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault()))}, $time"
+    }
+}
