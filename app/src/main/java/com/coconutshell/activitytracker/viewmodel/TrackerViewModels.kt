@@ -7,6 +7,13 @@ import com.coconutshell.activitytracker.domain.model.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
+data class HomeThingSummary(
+    val totalOccurrences: Int,
+    val latest: Occurrence?,
+    val todayQuantity: Double,
+    val todayCount: Int
+)
+
 class HomeViewModel(
     private val things: ThingRepository,
     private val occurrences: OccurrenceRepository,
@@ -38,6 +45,33 @@ class HomeViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val summaries: StateFlow<Map<Long, HomeThingSummary>> = thingsState
+        .flatMapLatest { current ->
+            if (current.isEmpty()) {
+                flowOf(emptyMap())
+            } else {
+                combine(
+                    current.map { thing -> occurrences.observeForThing(thing.id) }
+                ) { lists ->
+                    val zone = java.time.ZoneId.systemDefault()
+                    val today = java.time.LocalDate.now(zone)
+                    val start = today.atStartOfDay(zone).toInstant().toEpochMilli()
+                    val end = today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+                    current.mapIndexed { index, thing ->
+                        val rows = lists[index].sortedByDescending { it.occurredAt }
+                        val todayRows = rows.filter { it.occurredAt >= start && it.occurredAt < end }
+                        thing.id to HomeThingSummary(
+                            totalOccurrences = rows.size,
+                            latest = rows.firstOrNull(),
+                            todayQuantity = todayRows.sumOf { it.quantity },
+                            todayCount = todayRows.size
+                        )
+                    }.toMap()
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
     fun setQuery(value: String) {
         query.value = value
     }
@@ -50,6 +84,13 @@ class HomeViewModel(
         viewModelScope.launch {
             val trimmed = name.trim()
             if (trimmed.isNotEmpty()) onCreated(things.create(trimmed))
+        }
+    }
+
+    fun createLibrary(name: String, onCreated: (Long) -> Unit) {
+        viewModelScope.launch {
+            val trimmed = name.trim()
+            if (trimmed.isNotEmpty()) onCreated(libraries.create(trimmed))
         }
     }
 
