@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Local machine configuration
+local.properties
+
+# Kotlin / Java
+*.class
+.kotlin/
+
+# Generated reports / archives
+*.apk
+*.aab
+*.zip
+ci-reports/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp

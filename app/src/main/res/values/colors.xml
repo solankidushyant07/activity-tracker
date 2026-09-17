@@ -1,0 +1,5 @@
+<resources>
+    <color name="tracker_primary">#5E5CE6</color>
+    <color name="tracker_secondary">#00897B</color>
+    <color name="tracker_background">#F8F7FC</color>
+</resources>
