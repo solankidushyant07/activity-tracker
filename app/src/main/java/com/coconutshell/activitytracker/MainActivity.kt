@@ -220,8 +220,10 @@ private fun HomeScreen(
             thing = thing,
             onDismiss = { recordThing = null },
             onRecord = { at, qty ->
-                container.occurrences.record(thing.id, at, qty)
-                recordThing = null
+                scope.launch {
+                    container.occurrences.record(thing.id, at, qty)
+                    recordThing = null
+                }
             }
         )
     }
