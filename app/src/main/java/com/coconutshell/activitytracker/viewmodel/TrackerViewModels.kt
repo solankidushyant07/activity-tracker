@@ -7,18 +7,57 @@ import com.coconutshell.activitytracker.domain.model.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-class HomeViewModel(private val things: ThingRepository) : ViewModel() {
+class HomeViewModel(
+    private val things: ThingRepository,
+    private val occurrences: OccurrenceRepository,
+    private val libraries: LibraryRepository
+) : ViewModel() {
     val query = MutableStateFlow("")
-    val thingsState: StateFlow<List<Thing>> = query
-        .debounce(120)
-        .flatMapLatest { q -> if (q.isBlank()) things.observeThings() else things.search(q.trim()) }
+    val selectedLibrary = MutableStateFlow<Long?>(null)
+
+    val librariesState = libraries.observeLibraries()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    fun setQuery(value: String) { query.value = value }
+    val thingsState: StateFlow<List<Thing>> = combine(
+        query,
+        selectedLibrary
+    ) { q, libraryId -> q.trim() to libraryId }
+        .flatMapLatest { (q, libraryId) ->
+            val base = if (q.isBlank()) {
+                things.observeThings()
+            } else {
+                things.search(q)
+            }
+            if (libraryId == null) {
+                base
+            } else {
+                combine(base, libraries.observeThingIds(libraryId)) { rows, ids ->
+                    rows.filter { it.id in ids }
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun setQuery(value: String) {
+        query.value = value
+    }
+
+    fun setLibrary(libraryId: Long?) {
+        selectedLibrary.value = libraryId
+    }
+
     fun create(name: String, onCreated: (Long) -> Unit) {
         viewModelScope.launch {
-            if (name.isNotBlank()) onCreated(things.create(name))
+            val trimmed = name.trim()
+            if (trimmed.isNotEmpty()) onCreated(things.create(trimmed))
         }
+    }
+
+    suspend fun record(thingId: Long, at: Long, quantity: Double) {
+        require(quantity > 0.0 && quantity.isFinite()) {
+            "Quantity must be greater than zero."
+        }
+        occurrences.record(thingId, at, quantity)
     }
 }
 
@@ -28,23 +67,51 @@ class ThingDetailsViewModel(
     private val libraries: LibraryRepository,
     private val id: Long
 ) : ViewModel() {
-    val thing = things.observe(id).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-    val history = occurrences.observeForThing(id).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val libraryIds = libraries.observeLibraryIds(id).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val allLibraries = libraries.observeLibraries().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val thing = things.observe(id)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    fun record(at: Long, quantity: Double, onDone: () -> Unit) = viewModelScope.launch {
+    val history = occurrences.observeForThing(id)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val libraryIds = libraries.observeLibraryIds(id)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val allLibraries = libraries.observeLibraries()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    suspend fun record(at: Long, quantity: Double) {
+        require(quantity > 0.0 && quantity.isFinite()) { "Quantity must be greater than zero." }
         occurrences.record(id, at, quantity)
-        onDone()
     }
-    fun updateOccurrence(item: Occurrence) = viewModelScope.launch { occurrences.update(item) }
-    fun deleteOccurrence(item: Occurrence) = viewModelScope.launch { occurrences.delete(item) }
-    fun toggleLibrary(libraryId: Long, selected: Boolean) = viewModelScope.launch {
-        if (selected) libraries.addThing(id, libraryId) else libraries.removeThing(id, libraryId)
+
+    suspend fun updateOccurrence(item: Occurrence) {
+        require(item.quantity > 0.0 && item.quantity.isFinite()) {
+            "Quantity must be greater than zero."
+        }
+        occurrences.update(item)
     }
-    fun deleteThing(onDeleted: () -> Unit) = viewModelScope.launch {
+
+    suspend fun deleteOccurrence(item: Occurrence) {
+        occurrences.delete(item)
+    }
+
+    suspend fun toggleLibrary(libraryId: Long, selected: Boolean) {
+        if (selected) {
+            libraries.addThing(id, libraryId)
+        } else {
+            libraries.removeThing(id, libraryId)
+        }
+    }
+
+    suspend fun updateThing(name: String) {
+        val current = thing.value ?: return
+        val trimmed = name.trim()
+        require(trimmed.isNotEmpty()) { "Thing name cannot be empty." }
+        things.update(current.copy(name = trimmed))
+    }
+
+    suspend fun deleteThing() {
         thing.value?.let { things.delete(it) }
-        onDeleted()
     }
 }
 
@@ -57,20 +124,26 @@ class SettingsViewModel(
         SharingStarted.WhileSubscribed(5_000),
         com.coconutshell.activitytracker.settings.ReminderSettings()
     )
+    val error = MutableStateFlow<String?>(null)
 
     init {
         viewModelScope.launch {
             store.settings.collect { current ->
-                scheduler.setMorning(
-                    current.morningEnabled,
-                    current.morningTime.hour(),
-                    current.morningTime.minute()
-                )
-                scheduler.setNight(
-                    current.nightEnabled,
-                    current.nightTime.hour(),
-                    current.nightTime.minute()
-                )
+                error.value = null
+                runCatching {
+                    scheduler.setMorning(
+                        current.morningEnabled,
+                        current.morningTime.hour(),
+                        current.morningTime.minute()
+                    )
+                    scheduler.setNight(
+                        current.nightEnabled,
+                        current.nightTime.hour(),
+                        current.nightTime.minute()
+                    )
+                }.onFailure {
+                    error.value = "Couldn't schedule the reminder. Check your device reminder permissions."
+                }
             }
         }
     }
