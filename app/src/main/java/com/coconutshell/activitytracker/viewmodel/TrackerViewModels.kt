@@ -48,13 +48,52 @@ class ThingDetailsViewModel(
     }
 }
 
-class SettingsViewModel : ViewModel() {
-    val morningEnabled = MutableStateFlow(false)
-    val nightEnabled = MutableStateFlow(false)
-    val morningTime = MutableStateFlow("08:00")
-    val nightTime = MutableStateFlow("21:00")
-    fun toggleMorning(v: Boolean) { morningEnabled.value = v }
-    fun toggleNight(v: Boolean) { nightEnabled.value = v }
-    fun setMorning(v: String) { morningTime.value = v }
-    fun setNight(v: String) { nightTime.value = v }
+class SettingsViewModel(
+    private val store: com.coconutshell.activitytracker.settings.SettingsStore,
+    private val scheduler: com.coconutshell.activitytracker.reminder.ReminderScheduler
+) : ViewModel() {
+    val settings = store.settings.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        com.coconutshell.activitytracker.settings.ReminderSettings()
+    )
+
+    init {
+        viewModelScope.launch {
+            store.settings.collect { current ->
+                scheduler.setMorning(
+                    current.morningEnabled,
+                    current.morningTime.hour(),
+                    current.morningTime.minute()
+                )
+                scheduler.setNight(
+                    current.nightEnabled,
+                    current.nightTime.hour(),
+                    current.nightTime.minute()
+                )
+            }
+        }
+    }
+
+    fun toggleMorning(value: Boolean) = viewModelScope.launch {
+        store.setMorningEnabled(value)
+    }
+
+    fun toggleNight(value: Boolean) = viewModelScope.launch {
+        store.setNightEnabled(value)
+    }
+
+    fun setMorning(value: String) = viewModelScope.launch {
+        store.setMorningTime(value)
+    }
+
+    fun setNight(value: String) = viewModelScope.launch {
+        store.setNightTime(value)
+    }
+
+    private fun String.hour(): Int =
+        substringBefore(':').toIntOrNull()?.coerceIn(0, 23) ?: 8
+
+    private fun String.minute(): Int =
+        substringAfter(':', "0").toIntOrNull()?.coerceIn(0, 59) ?: 0
 }
